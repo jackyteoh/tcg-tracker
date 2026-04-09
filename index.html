@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TCG Card Tracker</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+  <div class="app">
+
+    <!-- Header -->
+    <div class="header">
+      <div>
+        <div class="title">TCG Card Tracker</div>
+        <div class="subtitle">Prices via Pokémon TCG API &nbsp;·&nbsp; TCGPlayer market data</div>
+      </div>
+      <div class="actions">
+        <span class="api-badge">pokemontcg.io</span>
+        <button class="btn btn-sm" id="refresh-btn" onclick="refreshAllPrices()">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 8a7 7 0 1 0 1.4-4.2"/><polyline points="1,2 1,6 5,6"/>
+          </svg>
+          Refresh prices
+        </button>
+        <button class="btn btn-sm" onclick="triggerImport()">Import CSV</button>
+        <button class="btn btn-sm btn-primary" onclick="exportCSV()">Export CSV</button>
+        <a class="btn btn-sm" href="tests.html">Run tests</a>
+      </div>
+    </div>
+
+    <!-- Refresh status -->
+    <div id="refresh-status-bar" style="min-height:20px; margin-bottom:0.5rem;"></div>
+
+    <!-- Summary metrics -->
+    <div class="summary-bar">
+      <div class="metric">
+        <div class="metric-label">Total cards</div>
+        <div class="metric-value" id="sum-count">0</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Total invested</div>
+        <div class="metric-value" id="sum-cost">$0.00</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Market value</div>
+        <div class="metric-value" id="sum-market">$0.00</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Expected profit</div>
+        <div class="metric-value pos" id="sum-profit">$0.00</div>
+      </div>
+    </div>
+
+    <!-- Card table -->
+    <div class="table-wrap">
+      <table id="card-table">
+        <thead>
+          <tr>
+            <th style="width:54px">Image</th>
+            <th style="min-width:140px">Name</th>
+            <th style="width:90px">Finish</th>
+            <th style="width:84px">Condition</th>
+            <th style="width:84px">Buy cost</th>
+            <th style="width:100px">Market (NM)</th>
+            <th style="width:80px">Low</th>
+            <th style="width:80px">Mid</th>
+            <th style="width:88px">Adj. price</th>
+            <th style="width:80px">Profit</th>
+            <th style="width:68px">Profit %</th>
+            <th style="width:80px">Link</th>
+            <th style="width:46px">Sold</th>
+            <th style="width:36px"></th>
+          </tr>
+        </thead>
+        <tbody id="card-body"></tbody>
+      </table>
+      <button class="add-row" onclick="openSearchModal()">+ Add card via search</button>
+    </div>
+
+  </div><!-- /.app -->
+
+  <!-- Hidden file input for CSV import -->
+  <input type="file" id="file-input" accept=".csv" style="display:none" onchange="handleFileImport(event)">
+
+  <!-- Import mode modal -->
+  <div class="modal-backdrop" id="import-modal" style="display:none">
+    <div class="modal">
+      <h3>Import CSV</h3>
+      <p>How would you like to import this file?</p>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeImportModal()">Cancel</button>
+        <button class="btn" onclick="doImport('add')">Add to existing list</button>
+        <button class="btn btn-primary" onclick="doImport('replace')">Replace list</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Card search modal -->
+  <div class="modal-backdrop" id="search-modal" style="display:none">
+    <div class="modal modal-lg">
+      <h3>Search Pokémon cards</h3>
+      <p class="search-hint">Search by card name — prices pulled live from TCGPlayer via pokemontcg.io</p>
+      <div class="search-input-wrap">
+        <input type="text" id="search-input" placeholder="e.g. Charizard, Pikachu VMAX..."
+          onkeydown="if(event.key==='Enter') doSearch()">
+        <button class="btn btn-primary" id="search-btn" onclick="doSearch()">Search</button>
+      </div>
+      <div id="search-results-area"></div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeSearchModal()">Cancel</button>
+        <button class="btn btn-primary" id="add-selected-btn" onclick="addSelectedCard()" disabled>Add to list</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="js/core.js"></script>
+  <script src="js/tracker.js"></script>
+</body>
+</html>
