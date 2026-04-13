@@ -18,14 +18,15 @@
       </div>
       <div class="actions">
         <span class="api-badge">pokemontcg.io</span>
-        <button class="btn btn-sm" id="refresh-btn" onclick="refreshAllPrices()">
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+        <button class="btn btn-sm" id="refresh-btn">
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
+               stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
             <path d="M1 8a7 7 0 1 0 1.4-4.2"/><polyline points="1,2 1,6 5,6"/>
           </svg>
           Refresh prices
         </button>
-        <button class="btn btn-sm" onclick="triggerImport()">Import CSV</button>
-        <button class="btn btn-sm btn-primary" onclick="exportCSV()">Export CSV</button>
+        <button class="btn btn-sm" id="import-csv">Import CSV</button>
+        <button class="btn btn-sm btn-primary" id="export-csv">Export CSV</button>
         <a class="btn btn-sm" href="tests.html">Run tests</a>
       </div>
     </div>
@@ -57,65 +58,82 @@
     <div class="table-wrap">
       <table id="card-table">
         <thead>
-          <tr>
-            <th style="width:54px">Image</th>
-            <th style="min-width:140px">Name</th>
-            <th style="width:90px">Finish</th>
-            <th style="width:84px">Condition</th>
-            <th style="width:84px">Buy cost</th>
-            <th style="width:100px">Market (NM)</th>
-            <th style="width:80px">Low</th>
-            <th style="width:80px">Mid</th>
-            <th style="width:88px">Adj. price</th>
-            <th style="width:80px">Profit</th>
-            <th style="width:68px">Profit %</th>
-            <th style="width:80px">Link</th>
-            <th style="width:46px">Sold</th>
-            <th style="width:36px"></th>
-          </tr>
+          <!-- Populated dynamically by renderTable() so sort arrows stay in sync -->
+          <tr></tr>
         </thead>
         <tbody id="card-body"></tbody>
       </table>
-      <button class="add-row" onclick="openSearchModal()">+ Add card via search</button>
+      <button class="add-row" id="add-card-via-search-btn">+ Add card via search</button>
     </div>
 
   </div><!-- /.app -->
 
-  <!-- Hidden file input for CSV import -->
-  <input type="file" id="file-input" accept=".csv" style="display:none" onchange="handleFileImport(event)">
+  <!-- Hidden file input fallback for CSV import on browsers without File System Access API -->
+  <input type="file" id="file-input" accept=".csv" style="display:none"
+         onchange="handleFileImport(event)">
 
-  <!-- Import mode modal -->
+  <!-- ── Import mode modal ─────────────────────────────────────── -->
   <div class="modal-backdrop" id="import-modal" style="display:none">
     <div class="modal">
       <h3>Import CSV</h3>
       <p>How would you like to import this file?</p>
       <div class="modal-actions">
-        <button class="btn" onclick="closeImportModal()">Cancel</button>
-        <button class="btn" onclick="doImport('add')">Add to existing list</button>
-        <button class="btn btn-primary" onclick="doImport('replace')">Replace list</button>
+        <button class="btn" id="close-import-btn">Cancel</button>
+        <button class="btn" id="do-import-btn">Add to existing list</button>
+        <button class="btn btn-primary" id="replace-import-btn">Replace list</button>
       </div>
     </div>
   </div>
 
-  <!-- Card search modal -->
+  <!-- ── Card search modal ─────────────────────────────────────── -->
   <div class="modal-backdrop" id="search-modal" style="display:none">
     <div class="modal modal-lg">
-      <h3>Search Pokémon cards</h3>
-      <p class="search-hint">Search by card name — prices pulled live from TCGPlayer via pokemontcg.io</p>
-      <div class="search-input-wrap">
-        <input type="text" id="search-input" placeholder="e.g. Charizard, Pikachu VMAX..."
-          onkeydown="if(event.key==='Enter') doSearch()">
-        <button class="btn btn-primary" id="search-btn" onclick="doSearch()">Search</button>
+      <h3>Add card</h3>
+
+      <!-- Tab bar -->
+      <div class="tab-bar">
+        <button class="tab-btn tab-active" id="tabBtn-name">
+          Search by name
+        </button>
+        <button class="tab-btn" id="tabBtn-url">
+          Paste TCGPlayer URL
+        </button>
       </div>
-      <div id="search-results-area"></div>
+
+      <!-- Tab: name search -->
+      <div id="tab-name">
+        <p class="search-hint">Search by card name — prices pulled live via pokemontcg.io</p>
+        <div class="search-input-wrap">
+          <input type="text" id="search-input" placeholder="e.g. Charizard, Pikachu VMAX…">
+          <button class="btn btn-primary" id="search-btn">Search</button>
+        </div>
+        <div id="search-results-area"></div>
+      </div>
+
+      <!-- Tab: URL lookup -->
+      <div id="tab-url" style="display:none">
+        <p class="search-hint">
+          Paste a TCGPlayer product URL and we'll look up the card automatically.<br>
+          Example: <code>https://www.tcgplayer.com/product/523161/pokemon-…</code>
+        </p>
+        <div class="search-input-wrap">
+          <input type="url" id="url-input" placeholder="https://www.tcgplayer.com/product/…">
+          <button class="btn btn-primary" id="url-lookup-btn">Look up</button>
+        </div>
+        <div id="url-status" style="font-size:13px;margin-top:0.5rem;min-height:20px"></div>
+        <p class="search-hint" style="margin-top:0.5rem">
+          After a successful lookup the card will appear under the "Search by name" tab for you to confirm and add.
+        </p>
+      </div>
+
       <div class="modal-actions">
-        <button class="btn" onclick="closeSearchModal()">Cancel</button>
-        <button class="btn btn-primary" id="add-selected-btn" onclick="addSelectedCard()" disabled>Add to list</button>
+        <button class="btn" id="close-search-btn">Cancel</button>
+        <button class="btn btn-primary" id="add-selected-btn" disabled>Add to list</button>
       </div>
     </div>
   </div>
 
-  <script src="js/core.js"></script>
-  <script src="js/tracker.js"></script>
+  <script type="module" src="js/core.js"></script>
+  <script type="module" src="js/tracker.js"></script>
 </body>
 </html>

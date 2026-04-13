@@ -7,10 +7,11 @@
 
 const {
   CONDITIONS, COND_MULT, FINISH_LABELS,
-  makeCard, resetIdCounter,
-  adjPrice, calcProfit,
-  fmt, fmtPct,
+  makeCard, resetIdCounter, touchUpdated,
+  adjPrice, calcProfit, sortCards,
+  fmt, fmtPct, fmtDate,
   exportCSV, parseCSV, splitCSVLine, csvRowToCard,
+  generateFilename, getSeedCards,
 } = window.TCG;
 
 /* ============================================================
@@ -453,6 +454,240 @@ const TEST_GROUPS = [
     ],
   },
 
+  {
+    name: 'Date fields — dateAdded & lastUpdated',
+    tests: [
+      {
+        name: 'makeCard sets dateAdded to a valid ISO string',
+        fn: () => {
+          const c = makeCard();
+          assert(typeof c.dateAdded === 'string', 'dateAdded should be a string');
+          assert(!isNaN(new Date(c.dateAdded)), 'dateAdded should be a valid date');
+        },
+      },
+      {
+        name: 'makeCard sets lastUpdated to a valid ISO string',
+        fn: () => {
+          const c = makeCard();
+          assert(!isNaN(new Date(c.lastUpdated)), 'lastUpdated should be a valid date');
+        },
+      },
+      {
+        name: 'dateAdded override is preserved by makeCard',
+        fn: () => {
+          const iso = '2024-01-15T10:00:00.000Z';
+          const c   = makeCard({ dateAdded: iso });
+          assertEqual(c.dateAdded, iso);
+        },
+      },
+      {
+        name: 'touchUpdated mutates lastUpdated to a more recent time',
+        fn: () => {
+          const c = makeCard({ lastUpdated: '2020-01-01T00:00:00.000Z' });
+          touchUpdated(c);
+          assert(c.lastUpdated > '2020-01-01T00:00:00.000Z', 'lastUpdated should be more recent after touch');
+        },
+      },
+      {
+        name: 'dateAdded and lastUpdated survive CSV round-trip',
+        fn: () => {
+          const iso  = '2024-06-01T12:00:00.000Z';
+          const card = makeCard({ dateAdded: iso, lastUpdated: iso });
+          const rows = parseCSV(exportCSV([card]));
+          assertEqual(rows[0].dateAdded,   iso);
+          assertEqual(rows[0].lastUpdated, iso);
+        },
+      },
+      {
+        name: 'csvRowToCard preserves dateAdded from CSV row',
+        fn: () => {
+          const iso      = '2023-11-20T08:30:00.000Z';
+          const restored = csvRowToCard({ dateAdded: iso });
+          assertEqual(restored.dateAdded, iso);
+        },
+      },
+      {
+        name: 'fmtDate returns — for null',
+        fn: () => assertEqual(fmtDate(null), '—'),
+      },
+      {
+        name: 'fmtDate returns — for empty string',
+        fn: () => assertEqual(fmtDate(''), '—'),
+      },
+      {
+        name: 'fmtDate returns — for an invalid date string',
+        fn: () => assertEqual(fmtDate('not-a-date'), '—'),
+      },
+      {
+        name: 'fmtDate returns a formatted string for a valid ISO date',
+        fn: () => {
+          const result = fmtDate('2024-04-10T14:30:00.000Z');
+          assert(result.length > 3, 'fmtDate should return a non-trivial string');
+          assert(result !== '—', 'fmtDate should not return — for a valid date');
+        },
+      },
+    ],
+  },
+
+  {
+    name: 'Sorting — sortCards()',
+    tests: [
+      {
+        name: 'Sorts by name ascending (A → Z)',
+        fn: () => {
+          const input  = [makeCard({ name: 'Zekrom' }), makeCard({ name: 'Arcanine' }), makeCard({ name: 'Mewtwo' })];
+          const sorted = sortCards(input, 'name', 'asc');
+          assertEqual(sorted[0].name, 'Arcanine');
+          assertEqual(sorted[2].name, 'Zekrom');
+        },
+      },
+      {
+        name: 'Sorts by name descending (Z → A)',
+        fn: () => {
+          const input  = [makeCard({ name: 'Arcanine' }), makeCard({ name: 'Zekrom' })];
+          const sorted = sortCards(input, 'name', 'desc');
+          assertEqual(sorted[0].name, 'Zekrom');
+        },
+      },
+      {
+        name: 'Sorts by buyCost numerically ascending',
+        fn: () => {
+          const input  = [makeCard({ buyCost: '30' }), makeCard({ buyCost: '5' }), makeCard({ buyCost: '12' })];
+          const sorted = sortCards(input, 'buyCost', 'asc');
+          assertEqual(sorted[0].buyCost, '5');
+          assertEqual(sorted[2].buyCost, '30');
+        },
+      },
+      {
+        name: 'Sorts by marketNM descending',
+        fn: () => {
+          const input  = [makeCard({ marketNM: 10 }), makeCard({ marketNM: 50 }), makeCard({ marketNM: 25 })];
+          const sorted = sortCards(input, 'marketNM', 'desc');
+          assertEqual(sorted[0].marketNM, 50);
+          assertEqual(sorted[2].marketNM, 10);
+        },
+      },
+      {
+        name: 'Null values sort last regardless of direction',
+        fn: () => {
+          const a = makeCard({ marketNM: 20 });
+          const b = makeCard({ marketNM: null });
+          const c = makeCard({ marketNM: 5 });
+          const asc  = sortCards([b, a, c], 'marketNM', 'asc');
+          const desc = sortCards([b, a, c], 'marketNM', 'desc');
+          assertEqual(asc[asc.length - 1].marketNM,   null);
+          assertEqual(desc[desc.length - 1].marketNM, null);
+        },
+      },
+      {
+        name: 'Does not mutate the original array',
+        fn: () => {
+          const input  = [makeCard({ name: 'B' }), makeCard({ name: 'A' })];
+          const sorted = sortCards(input, 'name', 'asc');
+          assertEqual(input[0].name,  'B', 'Original array should be unchanged');
+          assertEqual(sorted[0].name, 'A', 'Sorted array should be reordered');
+        },
+      },
+      {
+        name: 'Sorts by dateAdded ISO string ascending (older first)',
+        fn: () => {
+          const older  = makeCard({ dateAdded: '2023-01-01T00:00:00.000Z' });
+          const newer  = makeCard({ dateAdded: '2024-06-01T00:00:00.000Z' });
+          const sorted = sortCards([newer, older], 'dateAdded', 'asc');
+          assertEqual(sorted[0].dateAdded, '2023-01-01T00:00:00.000Z');
+        },
+      },
+      {
+        name: 'Sorts by sold boolean ascending (false before true)',
+        fn: () => {
+          const a = makeCard({ sold: true  });
+          const b = makeCard({ sold: false });
+          const sorted = sortCards([a, b], 'sold', 'asc');
+          assertEqual(sorted[0].sold, false);
+        },
+      },
+    ],
+  },
+
+  {
+    name: 'generateFilename()',
+    tests: [
+      {
+        name: 'Returns a string ending in .csv',
+        fn: () => {
+          const name = generateFilename();
+          assert(name.endsWith('.csv'), 'Expected .csv suffix, got: ' + name);
+        },
+      },
+      {
+        name: 'Starts with tcg-tracker-',
+        fn: () => {
+          const name = generateFilename();
+          assert(name.startsWith('tcg-tracker-'), 'Expected tcg-tracker- prefix, got: ' + name);
+        },
+      },
+      {
+        name: "Contains today's year",
+        fn: () => {
+          const name = generateFilename();
+          const year = String(new Date().getFullYear());
+          assert(name.includes(year), 'Expected year ' + year + ' in filename: ' + name);
+        },
+      },
+      {
+        name: 'Matches pattern tcg-tracker-YYYY-MM-DD.csv',
+        fn: () => {
+          const name = generateFilename();
+          assert(/tcg-tracker-\d{4}-\d{2}-\d{2}\.csv/.test(name),
+            'Filename "' + name + '" does not match expected pattern');
+        },
+      },
+    ],
+  },
+
+  {
+    name: 'Seed data — getSeedCards()',
+    tests: [
+      {
+        name: 'Returns a non-empty array',
+        fn: () => {
+          const seeds = getSeedCards();
+          assert(Array.isArray(seeds) && seeds.length > 0, 'getSeedCards should return a non-empty array');
+        },
+      },
+      {
+        name: 'Every card has a non-empty name',
+        fn: () => {
+          getSeedCards().forEach((c, i) => {
+            assert(c.name.length > 0, 'Card at index ' + i + ' has empty name');
+          });
+        },
+      },
+      {
+        name: 'Every card has a valid condition',
+        fn: () => {
+          getSeedCards().forEach(c => {
+            assert(CONDITIONS.includes(c.condition), 'Card "' + c.name + '" has invalid condition: ' + c.condition);
+          });
+        },
+      },
+      {
+        name: 'Every card has a valid dateAdded ISO string',
+        fn: () => {
+          getSeedCards().forEach(c => {
+            assert(!isNaN(new Date(c.dateAdded)), 'Card "' + c.name + '" has invalid dateAdded: ' + c.dateAdded);
+          });
+        },
+      },
+      {
+        name: 'At least one sold card exists in seed data',
+        fn: () => {
+          assert(getSeedCards().some(c => c.sold === true), 'Seed data should include at least one sold card');
+        },
+      },
+    ],
+  },
+
 ];
 
 /* ============================================================
@@ -575,3 +810,15 @@ function escHtml(s) {
   return String(s ?? '').replace(/&/g, '&amp;').replace(/"/g, '&quot;')
     .replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
+
+/* ============================================================
+   Event Listeners - test page
+   ============================================================ */
+
+const test_toggle_log_btn = document.getElementById("test-toggle-log-btn");
+
+test_toggle_log_btn.addEventListener("click", toggleLog);
+
+const run_all_btn = document.getElementById("run-btn")
+
+run_all_btn.addEventListener("click", runAll);

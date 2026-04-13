@@ -7,20 +7,25 @@
 
 const {
   CONDITIONS, FINISH_LABELS,
-  makeCard, adjPrice, calcProfit,
-  fmt, fmtPct, fmtTime, escHtml,
+  makeCard, touchUpdated, adjPrice, calcProfit, sortCards,
+  fmt, fmtPct, fmtTime, fmtDate, escHtml,
   downloadCSV, parseCSV, csvRowToCard,
-  searchCards, fetchCardPrices,
+  searchCards, fetchCardPrices, fetchCardByUrl,
+  getSeedCards,
 } = window.TCG;
 
 /* ============================================================
    State
    ============================================================ */
 
-let cards = [];
+let cards          = getSeedCards();   // initialise with dummy data
 let pendingCSVData = null;
-let selectedResult = null;   // { cardId, cardData, finish, prices, tcgUrl }
-let refreshing = false;
+let selectedResult = null;             // { cardId, cardData, finish, prices, tcgUrl }
+let refreshing     = false;
+
+// Sorting state
+let sortKey = 'dateAdded';
+let sortDir = 'desc';
 
 /* ============================================================
    Summary bar
@@ -44,6 +49,36 @@ function updateSummary() {
 }
 
 /* ============================================================
+   Column sort
+   ============================================================ */
+
+/**
+ * Called when a sortable <th> is clicked.
+ * @param {string} key
+ */
+function setSort(key) {
+  if (sortKey === key) {
+    sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    sortKey = key;
+    sortDir = 'asc';
+  }
+  renderTable();
+}
+
+/** Returns the sort indicator arrow for a column header. */
+function sortArrow(key) {
+  if (sortKey !== key) return '<span class="sort-arrow inactive">↕</span>';
+  return `<span class="sort-arrow">${sortDir === 'asc' ? '↑' : '↓'}</span>`;
+}
+
+/** Build a sortable <th> element's inner HTML. */
+function th(label, key, extraStyle = '') {
+  return `<th style="cursor:pointer;user-select:none;${extraStyle}" onclick="setSort('${key}')">`
+       + `${label} ${sortArrow(key)}</th>`;
+}
+
+/* ============================================================
    Table rendering
    ============================================================ */
 
@@ -52,13 +87,34 @@ function updateSummary() {
  * @param {number[]} [highlightIds=[]]  IDs to briefly highlight green (after refresh)
  */
 function renderTable(highlightIds = []) {
-  const tbody = document.getElementById('card-body');
-  tbody.innerHTML = '';
+  // Rebuild sortable header
+  const thead = document.querySelector('#card-table thead tr');
+  thead.innerHTML =
+    `<th style="width:54px">Image</th>` +
+    th('Name',         'name',        'min-width:140px') +
+    th('Finish',       'finish',      'width:90px') +
+    th('Condition',    'condition',   'width:84px') +
+    th('Buy cost',     'buyCost',     'width:84px') +
+    th('Market (NM)',  'marketNM',    'width:100px') +
+    th('Low',          'priceLow',    'width:78px') +
+    th('Mid',          'priceMid',    'width:78px') +
+    th('Adj. price',   'adjPrice',    'width:88px') +
+    th('Profit',       'profit',      'width:78px') +
+    th('Profit %',     'pct',         'width:68px') +
+    `<th style="width:80px">Link</th>` +
+    th('Sold',         'sold',        'width:46px') +
+    th('Date added',   'dateAdded',   'width:110px') +
+    th('Last updated', 'lastUpdated', 'width:110px') +
+    `<th style="width:36px"></th>`;
 
-  for (const card of cards) {
-    const adj              = adjPrice(card);
-    const { profit, pct }  = calcProfit(card);
-    const highlighted      = highlightIds.includes(card.id);
+  const tbody       = document.getElementById('card-body');
+  tbody.innerHTML   = '';
+  const displayRows = sortCards(cards, sortKey, sortDir);
+
+  for (const card of displayRows) {
+    const adj             = adjPrice(card);
+    const { profit, pct } = calcProfit(card);
+    const highlighted     = highlightIds.includes(card.id);
 
     const tr = document.createElement('tr');
     if (card.sold) tr.classList.add('sold');
@@ -83,7 +139,7 @@ function renderTable(highlightIds = []) {
           ? `<div style="font-size:10px;color:var(--text-tertiary);margin-top:2px">${escHtml(card.setName)}</div>`
           : ''}
         ${card.lastRefreshed
-          ? `<div class="refresh-detail">Updated ${fmtTime(card.lastRefreshed)}</div>`
+          ? `<div class="refresh-detail">Price refreshed ${fmtTime(card.lastRefreshed)}</div>`
           : ''}
       </td>
 
@@ -108,7 +164,6 @@ function renderTable(highlightIds = []) {
       <td style="font-size:12px${highlighted ? ';color:var(--text-success)' : ''}">
         ${fmt(card.marketNM)}
       </td>
-
       <td style="font-size:12px;color:var(--text-secondary)">${fmt(card.priceLow)}</td>
       <td style="font-size:12px;color:var(--text-secondary)">${fmt(card.priceMid)}</td>
 
@@ -119,7 +174,6 @@ function renderTable(highlightIds = []) {
       <td class="${profit === null ? '' : profit >= 0 ? 'profit-pos' : 'profit-neg'}">
         ${fmt(profit)}
       </td>
-
       <td class="${pct === null ? '' : pct >= 0 ? 'profit-pos' : 'profit-neg'}">
         ${fmtPct(pct)}
       </td>
@@ -135,6 +189,9 @@ function renderTable(highlightIds = []) {
                onchange="setField(${card.id}, 'sold', this.checked)">
       </td>
 
+      <td class="date-cell">${escHtml(fmtDate(card.dateAdded))}</td>
+      <td class="date-cell">${escHtml(fmtDate(card.lastUpdated))}</td>
+
       <td>
         <button class="trash-btn" onclick="deleteCard(${card.id})" title="Delete card">
           &#x1F5D1;
@@ -143,7 +200,7 @@ function renderTable(highlightIds = []) {
     `;
     tbody.appendChild(tr);
   }
-
+  console.log("Table rendered successfully");
   updateSummary();
 }
 
@@ -155,6 +212,7 @@ function setField(id, field, value) {
   const card = cards.find(c => c.id === id);
   if (!card) return;
   card[field] = value;
+  touchUpdated(card);
   renderTable();
 }
 
@@ -193,10 +251,11 @@ async function refreshAllPrices() {
       const prices = await fetchCardPrices(card.tcgplayerId);
       if (prices) {
         const p = prices[card.finish] || prices[Object.keys(prices)[0]] || {};
-        if (p.market  !== undefined) card.marketNM  = p.market;
-        if (p.low     !== undefined) card.priceLow  = p.low;
-        if (p.mid     !== undefined) card.priceMid  = p.mid;
+        if (p.market !== undefined) card.marketNM  = p.market;
+        if (p.low    !== undefined) card.priceLow  = p.low;
+        if (p.mid    !== undefined) card.priceMid  = p.mid;
         card.lastRefreshed = Date.now();
+        touchUpdated(card);
         updatedIds.push(card.id);
         ok++;
       } else {
@@ -205,17 +264,18 @@ async function refreshAllPrices() {
     } catch {
       fail++;
     }
-    // Brief pause between requests to be a polite API citizen
     await new Promise(r => setTimeout(r, 150));
   }
 
   renderTable(updatedIds);
 
   const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-  const msg  = `Refreshed ${ok} card${ok !== 1 ? 's' : ''}` +
-               (fail ? ` · ${fail} failed` : '') +
-               `  ·  ${time}`;
-  setStatus(msg, fail && !ok ? 'err' : 'ok');
+  setStatus(
+    `Refreshed ${ok} card${ok !== 1 ? 's' : ''}` +
+    (fail ? ` · ${fail} failed` : '') +
+    `  ·  ${time}`,
+    fail && !ok ? 'err' : 'ok'
+  );
 
   btn.disabled = false;
   btn.innerHTML = `
@@ -239,24 +299,55 @@ function setStatus(html, type = '') {
 
 function openSearchModal(editId) {
   selectedResult = null;
-  document.getElementById('search-input').value = '';
+
+  // Reset all tabs and fields
+  document.getElementById('search-input').value   = '';
+  document.getElementById('url-input').value      = '';
   document.getElementById('search-results-area').innerHTML = '';
+  document.getElementById('url-status').innerHTML = '';
   document.getElementById('add-selected-btn').disabled = true;
   document.getElementById('search-modal').dataset.editId = editId || '';
   document.getElementById('search-modal').style.display = 'flex';
+
+  // Default to name search tab
+  switchTab('name');
   setTimeout(() => document.getElementById('search-input').focus(), 80);
 }
 
 function closeSearchModal() {
   document.getElementById('search-modal').style.display = 'none';
+  selectedResult = null;
 }
+
+/** Switch between "Search by name" and "Paste URL" tabs. */
+function switchTab(tab) {
+  const namePane = document.getElementById('tab-name');
+  const urlPane  = document.getElementById('tab-url');
+  const nameBtn  = document.getElementById('tabBtn-name');
+  const urlBtn   = document.getElementById('tabBtn-url');
+
+  if (tab === 'name') {
+    namePane.style.display = 'block';
+    urlPane.style.display  = 'none';
+    nameBtn.classList.add('tab-active');
+    urlBtn.classList.remove('tab-active');
+    document.getElementById('add-selected-btn').disabled = !selectedResult;
+  } else {
+    namePane.style.display = 'none';
+    urlPane.style.display  = 'block';
+    nameBtn.classList.remove('tab-active');
+    urlBtn.classList.add('tab-active');
+  }
+}
+
+/* ---- Name search tab ---- */
 
 async function doSearch() {
   const q = document.getElementById('search-input').value.trim();
   if (!q) return;
 
-  const area  = document.getElementById('search-results-area');
-  const btn   = document.getElementById('search-btn');
+  const area = document.getElementById('search-results-area');
+  const btn  = document.getElementById('search-btn');
   area.innerHTML = '<div class="loading-state">Searching…</div>';
   btn.disabled   = true;
   selectedResult = null;
@@ -269,8 +360,9 @@ async function doSearch() {
       return;
     }
     renderSearchResults(data);
-  } catch {
-    area.innerHTML = '<div class="no-results">Search failed. Check your connection and try again.</div>';
+  } catch (err) {
+    area.innerHTML = `<div class="no-results">Search failed: ${escHtml(err.message)}.<br>
+      If you're running locally, make sure you're serving via HTTP (not file://).</div>`;
   } finally {
     btn.disabled = false;
   }
@@ -282,12 +374,12 @@ function renderSearchResults(data) {
   area.className = 'search-results';
 
   for (const card of data) {
-    const prices      = card.tcgplayer?.prices || {};
-    const finishKeys  = Object.keys(prices);
-    const defaultFin  = finishKeys[0] || null;
+    const prices     = card.tcgplayer?.prices || {};
+    const finishKeys = Object.keys(prices);
+    const defaultFin = finishKeys[0] || null;
 
     const div = document.createElement('div');
-    div.className = 'result-card';
+    div.className              = 'result-card';
     div.dataset.cardId         = card.id;
     div.dataset.selectedFinish = defaultFin || '';
 
@@ -322,12 +414,11 @@ function renderSearchResults(data) {
       </div>
     `;
 
-    // Store full card data for later
     div.dataset.cardJson = JSON.stringify({
-      id:       card.id,
-      name:     card.name,
-      imageUrl: card.images?.large || card.images?.small || '',
-      setName:  card.set?.name || '',
+      id:        card.id,
+      name:      card.name,
+      imageUrl:  card.images?.large || card.images?.small || '',
+      setName:   card.set?.name || '',
       tcgplayer: card.tcgplayer || null,
     });
 
@@ -341,8 +432,10 @@ function selectFinish(cardId, finish, evt) {
   const div = document.querySelector(`[data-card-id="${cardId}"]`);
   if (!div) return;
   div.dataset.selectedFinish = finish;
-  div.querySelectorAll('.price-pill').forEach(p => p.classList.toggle('selected-type', p.dataset.finish === finish));
-  div.querySelectorAll('.finish-btn').forEach(b => b.classList.toggle('active', b.dataset.finish === finish));
+  div.querySelectorAll('.price-pill').forEach(p =>
+    p.classList.toggle('selected-type', p.dataset.finish === finish));
+  div.querySelectorAll('.finish-btn').forEach(b =>
+    b.classList.toggle('active', b.dataset.finish === finish));
   if (selectedResult && selectedResult.cardId === cardId) selectedResult.finish = finish;
 }
 
@@ -358,19 +451,64 @@ function selectResultCard(card, div) {
     cardData,
     finish,
     prices: card.tcgplayer?.prices || {},
-    tcgUrl: card.tcgplayer?.url   || '',
+    tcgUrl: card.tcgplayer?.url || '',
   };
   document.getElementById('add-selected-btn').disabled = false;
 }
+
+/* ---- URL tab ---- */
+
+async function doUrlLookup() {
+  const url     = document.getElementById('url-input').value.trim();
+  const statusEl = document.getElementById('url-status');
+  const btn      = document.getElementById('url-lookup-btn');
+
+  if (!url) return;
+
+  statusEl.innerHTML = '<span style="color:var(--text-secondary)">Looking up card…</span>';
+  btn.disabled       = true;
+  selectedResult     = null;
+  document.getElementById('add-selected-btn').disabled = true;
+
+  try {
+    const card = await fetchCardByUrl(url);
+    if (!card) {
+      statusEl.innerHTML =
+        `<span style="color:var(--text-danger)">
+           Could not find a matching Pokémon card for that URL.<br>
+           Make sure it's a TCGPlayer product URL (e.g. tcgplayer.com/product/12345/…).
+         </span>`;
+      return;
+    }
+
+    // Render the single result in the name-search results area,
+    // then switch to name tab so user can see and select it
+    renderSearchResults([card]);
+    switchTab('name');
+
+    // Auto-select the single result
+    const div = document.querySelector('.result-card');
+    if (div) selectResultCard(card, div);
+
+    statusEl.innerHTML = '';
+  } catch (err) {
+    statusEl.innerHTML =
+      `<span style="color:var(--text-danger)">Lookup failed: ${escHtml(err.message)}</span>`;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---- Add card to list ---- */
 
 function addSelectedCard() {
   if (!selectedResult) return;
 
   const { cardData, finish, prices, tcgUrl } = selectedResult;
-  const p = prices[finish] || {};
-
+  const p      = prices[finish] || {};
   const editId = parseInt(document.getElementById('search-modal').dataset.editId) || 0;
-  const entry  = {
+
+  const entry = {
     name:        cardData.name,
     imageUrl:    cardData.imageUrl,
     setName:     cardData.setName,
@@ -387,7 +525,10 @@ function addSelectedCard() {
 
   if (editId) {
     const idx = cards.findIndex(c => c.id === editId);
-    if (idx >= 0) cards[idx] = { ...cards[idx], ...entry };
+    if (idx >= 0) {
+      cards[idx] = { ...cards[idx], ...entry };
+      touchUpdated(cards[idx]);
+    }
   } else {
     cards.push(makeCard(entry));
   }
@@ -400,7 +541,27 @@ function addSelectedCard() {
    CSV import
    ============================================================ */
 
-function triggerImport() {
+/**
+ * Open the file picker using the File System Access API when available,
+ * otherwise fall back to a hidden <input type="file">.
+ */
+async function triggerImport() {
+  if (window.showOpenFilePicker) {
+    try {
+      const [fh] = await window.showOpenFilePicker({
+        types: [{ description: 'CSV files', accept: { 'text/csv': ['.csv'] } }],
+        multiple: false,
+      });
+      const file = await fh.getFile();
+      const text = await file.text();
+      pendingCSVData = text;
+      document.getElementById('import-modal').style.display = 'flex';
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return; // user cancelled
+      // Fall through to legacy input
+    }
+  }
   document.getElementById('file-input').click();
 }
 
@@ -434,8 +595,8 @@ function doImport(mode) {
    CSV export
    ============================================================ */
 
-function exportCSV() {
-  downloadCSV(cards);
+async function exportCSV() {
+  await downloadCSV(cards);
 }
 
 /* ============================================================
@@ -454,3 +615,57 @@ document.addEventListener('keydown', e => {
    ============================================================ */
 
 renderTable();
+
+/* ============================================================
+   Event Listeners - main page
+   ============================================================ */
+
+const refresh_btn = document.getElementById("refresh-btn");
+const import_btn = document.getElementById("import-csv");
+const export_btn = document.getElementById("export-csv");
+const add_btn = document.getElementById("add-card-via-search-btn");
+
+const close_import_btn = document.getElementById("close-import-btn");
+const do_import_btn = document.getElementById("do-import-btn");
+const replace_import_btn = document.getElementById("replace-import-btn");
+
+const tab_btn_name = document.getElementById("tabBtn-name");
+const tab_btn_url = document.getElementById("tabBtn-url")
+
+const search_input = document.getElementById("search-input");
+const search_btn = document.getElementById("search-btn");
+
+const url_input = document.getElementById("url-input");
+const url_btn = document.getElementById("url-lookup-btn");
+
+const close_search_btn = document.getElementById("close-search-btn");
+const add_selected_btn = document.getElementById("add-selected-btn");
+
+refresh_btn.addEventListener("click", refreshAllPrices);
+import_btn.addEventListener("click", triggerImport);
+export_btn.addEventListener("click", exportCSV);
+add_btn.addEventListener("click", openSearchModal);
+
+close_import_btn.addEventListener("click", closeImportModal);
+do_import_btn.addEventListener("click", () => doImport('add'));
+replace_import_btn.addEventListener("click", () => doImport('replace'));
+
+tab_btn_name.addEventListener("click", () => switchTab('name'));
+tab_btn_url.addEventListener("click", () => switchTab('url'));
+
+search_input.addEventListener("keydown", (event) => { 
+  if (event.key === 'Enter') {
+    doSearch();
+  }
+});
+search_btn.addEventListener("click", doSearch);
+
+url_input.addEventListener("keydown", (event) => { 
+  if (event.key === 'Enter') {
+    doUrlLookup();
+  }
+});
+url_btn.addEventListener("click", doUrlLookup); // NEED TO FIX URL LOOKUP
+
+close_search_btn.addEventListener("click", closeSearchModal);
+add_selected_btn.addEventListener("click", addSelectedCard);

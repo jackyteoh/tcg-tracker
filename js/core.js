@@ -31,7 +31,7 @@ const FINISH_LABELS = {
 const CSV_HEADERS = [
   'name', 'setName', 'finish', 'imageUrl', 'condition',
   'buyCost', 'marketNM', 'priceLow', 'priceMid',
-  'link', 'sold', 'tcgplayerId',
+  'link', 'sold', 'tcgplayerId', 'dateAdded', 'lastUpdated',
 ];
 
 const POKEMON_API = 'https://api.pokemontcg.io/v2/cards';
@@ -44,10 +44,12 @@ let _nextId = 1;
 
 /**
  * Create a card object with sensible defaults.
+ * dateAdded and lastUpdated are stored as ISO strings for CSV compatibility.
  * @param {Partial<Card>} overrides
  * @returns {Card}
  */
 function makeCard(overrides = {}) {
+  const now = new Date().toISOString();
   return {
     id:            _nextId++,
     name:          '',
@@ -63,6 +65,8 @@ function makeCard(overrides = {}) {
     sold:          false,
     tcgplayerId:   '',
     lastRefreshed: null,
+    dateAdded:     now,
+    lastUpdated:   now,
     ...overrides,
   };
 }
@@ -70,6 +74,15 @@ function makeCard(overrides = {}) {
 /** Reset the ID counter (used by the test suite between runs). */
 function resetIdCounter() {
   _nextId = 1;
+}
+
+/**
+ * Touch the lastUpdated timestamp on a card (mutates in place).
+ * Call this whenever a user-driven field changes.
+ * @param {Card} card
+ */
+function touchUpdated(card) {
+  card.lastUpdated = new Date().toISOString();
 }
 
 /* ============================================================
@@ -99,6 +112,50 @@ function calcProfit(card) {
   if (!adj || !buy) return { profit: null, pct: null };
   const profit = adj - buy;
   return { profit, pct: (profit / buy) * 100 };
+}
+
+/* ============================================================
+   Sorting
+   ============================================================ */
+
+/**
+ * Sort an array of cards by a given column key.
+ * Returns a NEW sorted array (does not mutate the original).
+ * @param {Card[]} cards
+ * @param {string} key      - Card field name to sort by
+ * @param {'asc'|'desc'} dir
+ * @returns {Card[]}
+ */
+function sortCards(cards, key, dir) {
+  const multiplier = dir === 'asc' ? 1 : -1;
+
+  return [...cards].sort((a, b) => {
+    let av = a[key];
+    let bv = b[key];
+
+    // Computed fields not stored on the object
+    if (key === 'adjPrice') { av = adjPrice(a); bv = adjPrice(b); }
+    if (key === 'profit')   { av = calcProfit(a).profit ?? -Infinity; bv = calcProfit(b).profit ?? -Infinity; }
+    if (key === 'pct')      { av = calcProfit(a).pct    ?? -Infinity; bv = calcProfit(b).pct    ?? -Infinity; }
+
+    // Nulls always sort last regardless of direction
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+
+    // Numeric comparison
+    const an = parseFloat(av), bn = parseFloat(bv);
+    if (!isNaN(an) && !isNaN(bn)) return (an - bn) * multiplier;
+
+    // Date string comparison (ISO strings compare lexicographically correctly)
+    if (typeof av === 'string' && typeof bv === 'string') {
+      return av.localeCompare(bv) * multiplier;
+    }
+
+    // Boolean comparison
+    if (typeof av === 'boolean') return ((av ? 1 : 0) - (bv ? 1 : 0)) * multiplier;
+
+    return 0;
+  });
 }
 
 /* ============================================================
@@ -137,6 +194,21 @@ function fmtTime(ts) {
 }
 
 /**
+ * Format an ISO date string as a compact date+time.
+ * e.g. "Apr 10, 2:34 PM"
+ * Returns '—' for falsy / invalid input.
+ * @param {string|null} iso
+ * @returns {string}
+ */
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d)) return '—';
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) +
+    ', ' + d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+}
+
+/**
  * Escape a string for safe insertion into HTML attribute values or text nodes.
  * @param {string} s
  * @returns {string}
@@ -165,16 +237,56 @@ function exportCSV(cards) {
 }
 
 /**
- * Trigger a CSV download in the browser.
- * @param {Card[]} cards
- * @param {string} [filename='tcg-tracker.csv']
+ * Generate an auto filename like "tcg-tracker-2025-04-10.csv"
+ * @returns {string}
  */
-function downloadCSV(cards, filename = 'tcg-tracker.csv') {
-  const blob = new Blob([exportCSV(cards)], { type: 'text/csv' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
+function generateFilename() {
+  const d   = new Date();
+  const y   = d.getFullYear();
+  const m   = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `tcg-tracker-${y}-${m}-${day}.csv`;
+}
+
+/**
+ * Trigger a CSV download in the browser.
+ * Uses the File System Access API (showSaveFilePicker) when available —
+ * this opens a native "Save As" dialog so the user can choose the location.
+ * Falls back to a standard anchor-download on unsupported browsers.
+ * @param {Card[]} cards
+ * @returns {Promise<void>}
+ */
+async function downloadCSV(cards) {
+  const content  = exportCSV(cards);
+  const filename = generateFilename();
+
+  if (typeof window !== 'undefined' && window.showSaveFilePicker) {
+    try {
+      const fh = await window.showSaveFilePicker({
+        suggestedName: filename,
+        types: [{
+          description: 'CSV spreadsheet',
+          accept: { 'text/csv': ['.csv'] },
+        }],
+      });
+      const writable = await fh.createWritable();
+      await writable.write(content);
+      await writable.close();
+      return;
+    } catch (err) {
+      if (err.name === 'AbortError') return; // user cancelled — do nothing
+      // Other errors: fall through to anchor download
+    }
+  }
+
+  // Fallback — browser auto-chooses the Downloads folder
+  const blob = new Blob([content], { type: 'text/csv' });
+  const a    = document.createElement('a');
+  a.href     = URL.createObjectURL(blob);
   a.download = filename;
+  document.body.appendChild(a);
   a.click();
+  document.body.removeChild(a);
   URL.revokeObjectURL(a.href);
 }
 
@@ -189,7 +301,7 @@ function parseCSV(text) {
   const headers = lines[0].split(',').map(h => h.trim().replace(/^"|"$/g, ''));
   return lines.slice(1).map(line => {
     const vals = splitCSVLine(line);
-    const obj = {};
+    const obj  = {};
     headers.forEach((h, i) => { obj[h] = (vals[i] ?? '').trim(); });
     return obj;
   });
@@ -215,10 +327,12 @@ function splitCSVLine(line) {
 
 /**
  * Convert a parsed CSV row object back into a Card object.
+ * Preserves dateAdded from the CSV; sets lastUpdated to now if missing.
  * @param {Object} row
  * @returns {Card}
  */
 function csvRowToCard(row) {
+  const now = new Date().toISOString();
   return makeCard({
     name:        row.name        || '',
     imageUrl:    row.imageUrl    || '',
@@ -232,6 +346,8 @@ function csvRowToCard(row) {
     link:        row.link        || '',
     sold:        row.sold === 'true' || row.sold === '1',
     tcgplayerId: row.tcgplayerId || '',
+    dateAdded:   row.dateAdded   || now,
+    lastUpdated: row.lastUpdated || now,
   });
 }
 
@@ -266,6 +382,184 @@ async function fetchCardPrices(tcgplayerId) {
   return json.data?.tcgplayer?.prices || null;
 }
 
+/**
+ * Try to look up a card via a TCGPlayer URL by extracting the numeric product ID,
+ * then querying the Pokémon TCG API's tcgplayer.productId field.
+ *
+ * TCGPlayer URLs contain the product ID as the first numeric segment after /product/:
+ *   https://www.tcgplayer.com/product/523161/pokemon-...
+ *
+ * Returns null when the URL format isn't recognised or the lookup finds nothing.
+ * @param {string} url
+ * @returns {Promise<Object|null>}  raw Pokémon TCG API card object, or null
+ */
+async function fetchCardByUrl(url) {
+  const productMatch = url.match(/tcgplayer\.com\/product\/(\d+)/i);
+  if (!productMatch) return null;
+
+  const productId = productMatch[1];
+  try {
+    const res = await fetch(
+      `${POKEMON_API}?q=tcgplayer.productId:${productId}` +
+      `&select=id,name,images,set,number,tcgplayer`
+    );
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.data?.[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/* ============================================================
+   Seed / dummy data
+   ============================================================ */
+
+/**
+ * Returns an array of pre-populated card objects for local development.
+ * Prices are approximate real-world values as of early 2025.
+ * @returns {Card[]}
+ */
+function getSeedCards() {
+  // Helper: ISO string N days ago
+  const daysAgo = (n) => {
+    const t = new Date();
+    t.setDate(t.getDate() - n);
+    return t.toISOString();
+  };
+
+  return [
+    makeCard({
+      name: 'Charizard ex',
+      setName: 'Scarlet & Violet — 151',
+      finish: 'holofoil',
+      condition: 'NM',
+      buyCost: '18.00',
+      marketNM: 32.50,
+      priceLow: 25.00,
+      priceMid: 30.00,
+      imageUrl: 'https://images.pokemontcg.io/sv3pt5/6_hires.png',
+      link: 'https://www.tcgplayer.com/product/502558',
+      tcgplayerId: 'sv3pt5-6',
+      sold: false,
+      dateAdded: daysAgo(14),
+      lastUpdated: daysAgo(2),
+    }),
+    makeCard({
+      name: 'Pikachu ex',
+      setName: 'Scarlet & Violet — 151',
+      finish: 'holofoil',
+      condition: 'NM',
+      buyCost: '8.50',
+      marketNM: 12.00,
+      priceLow: 9.00,
+      priceMid: 11.00,
+      imageUrl: 'https://images.pokemontcg.io/sv3pt5/25_hires.png',
+      link: 'https://www.tcgplayer.com/product/523170/pokemon-scarlet-violet-151-pikachu-ex',
+      tcgplayerId: 'sv3pt5-25',
+      sold: false,
+      dateAdded: daysAgo(14),
+      lastUpdated: daysAgo(14),
+    }),
+    makeCard({
+      name: 'Mewtwo ex',
+      setName: 'Scarlet & Violet — 151',
+      finish: 'holofoil',
+      condition: 'LP',
+      buyCost: '22.00',
+      marketNM: 28.00,
+      priceLow: 22.00,
+      priceMid: 26.00,
+      imageUrl: 'https://images.pokemontcg.io/sv3pt5/205_hires.png',
+      link: 'https://www.tcgplayer.com/product/523206/pokemon-scarlet-violet-151-mewtwo-ex',
+      tcgplayerId: 'sv3pt5-205',
+      sold: false,
+      dateAdded: daysAgo(10),
+      lastUpdated: daysAgo(10),
+    }),
+    makeCard({
+      name: 'Charizard VSTAR',
+      setName: 'Pokémon GO',
+      finish: 'holofoil',
+      condition: 'NM',
+      buyCost: '14.00',
+      marketNM: 11.50,
+      priceLow: 9.00,
+      priceMid: 10.75,
+      imageUrl: 'https://images.pokemontcg.io/pgo/10_hires.png',
+      link: 'https://www.tcgplayer.com/product/482767/pokemon-pokemon-go-charizard-vstar',
+      tcgplayerId: 'pgo-10',
+      sold: false,
+      dateAdded: daysAgo(30),
+      lastUpdated: daysAgo(30),
+    }),
+    makeCard({
+      name: 'Rayquaza VMAX',
+      setName: 'Evolving Skies',
+      finish: 'holofoil',
+      condition: 'NM',
+      buyCost: '30.00',
+      marketNM: 52.00,
+      priceLow: 44.00,
+      priceMid: 49.00,
+      imageUrl: 'https://images.pokemontcg.io/swsh7/218_hires.png',
+      link: 'https://www.tcgplayer.com/product/241600/pokemon-evolving-skies-rayquaza-vmax',
+      tcgplayerId: 'swsh7-218',
+      sold: false,
+      dateAdded: daysAgo(60),
+      lastUpdated: daysAgo(5),
+    }),
+    makeCard({
+      name: 'Umbreon VMAX',
+      setName: 'Evolving Skies',
+      finish: 'holofoil',
+      condition: 'NM',
+      buyCost: '38.00',
+      marketNM: 60.00,
+      priceLow: 50.00,
+      priceMid: 56.00,
+      imageUrl: 'https://images.pokemontcg.io/swsh7/215_hires.png',
+      link: 'https://www.tcgplayer.com/product/241597/pokemon-evolving-skies-umbreon-vmax',
+      tcgplayerId: 'swsh7-215',
+      sold: true,
+      dateAdded: daysAgo(45),
+      lastUpdated: daysAgo(7),
+    }),
+    makeCard({
+      name: 'Lugia VSTAR',
+      setName: 'Silver Tempest',
+      finish: 'holofoil',
+      condition: 'MP',
+      buyCost: '20.00',
+      marketNM: 38.00,
+      priceLow: 30.00,
+      priceMid: 35.00,
+      imageUrl: 'https://images.pokemontcg.io/swsh7/218_hires.png',
+      link: 'https://www.tcgplayer.com/product/268391/pokemon-silver-tempest-lugia-vstar',
+      tcgplayerId: 'swsh12-227',
+      sold: false,
+      dateAdded: daysAgo(20),
+      lastUpdated: daysAgo(20),
+    }),
+    makeCard({
+      name: 'Mew VMAX',
+      setName: 'Fusion Strike',
+      finish: 'holofoil',
+      condition: 'NM',
+      buyCost: '16.00',
+      marketNM: 22.00,
+      priceLow: 17.50,
+      priceMid: 20.00,
+      imageUrl: 'https://images.pokemontcg.io/swsh8/271_hires.png',
+      link: 'https://www.tcgplayer.com/product/249454/pokemon-fusion-strike-mew-vmax',
+      tcgplayerId: 'swsh8-271',
+      sold: false,
+      dateAdded: daysAgo(8),
+      lastUpdated: daysAgo(8),
+    }),
+  ];
+}
+
 /* ============================================================
    Expose to global scope (used by tracker.js and tests.js)
    ============================================================ */
@@ -279,21 +573,29 @@ window.TCG = {
   // Card model
   makeCard,
   resetIdCounter,
+  touchUpdated,
   // Calculations
   adjPrice,
   calcProfit,
+  // Sorting
+  sortCards,
   // Formatters
   fmt,
   fmtPct,
   fmtTime,
+  fmtDate,
   escHtml,
   // CSV
   exportCSV,
   downloadCSV,
+  generateFilename,
   parseCSV,
   splitCSVLine,
   csvRowToCard,
   // API
   searchCards,
   fetchCardPrices,
+  fetchCardByUrl,
+  // Seed data
+  getSeedCards,
 };
