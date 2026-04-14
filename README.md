@@ -3,19 +3,29 @@
 A browser-based Pokémon TCG card tracker with live prices from the
 [Pokémon TCG API](https://pokemontcg.io/) (TCGPlayer market data).
 
-## Features
+## What's new in this version
 
-- **Search by name** — images, set info, and TCGPlayer prices auto-populate
-- **Paste TCGPlayer URL** — look up a card directly from a product URL
-- **Condition-adjusted pricing** — NM / LP / MP / HP / DMG multipliers
-- **Column sorting** — click any column header to sort ↑ / ↓
-- **Date Added & Last Updated** columns — automatically tracked
-- **Refresh prices** — re-fetches live market data for all API-linked cards
-- **Mark as Sold** — row turns green; excluded from expected profit
-- **Import CSV** — native Save dialog (Chrome/Edge) or file picker fallback
-- **Export CSV** — auto-named `tcg-tracker-YYYY-MM-DD.csv`, native Save As dialog where supported
-- **Seed data** — 8 pre-loaded cards so you can explore the UI immediately
-- **Unit test suite** at `/tests.html` — 76 tests across 11 groups
+- **ES module architecture** — `core.js` uses `export`, `tracker.js` and `tests.js`
+  use `import`. No more `window.TCG` bridge. The browser resolves the dependency
+  graph automatically.
+- **Event delegation** — table rows use a single delegated listener on `<tbody>`
+  instead of inline `onclick`/`oninput`/`onchange` on every cell.
+- **`initUI()` pattern** — all static button listeners are wired in one place at
+  the bottom of each file. No intermediate `const` variables — listeners are
+  attached inline with `getElementById(...).addEventListener(...)`.
+- **localStorage persistence** — the card list survives page refresh automatically.
+  Seed data only loads on the very first visit (when storage is empty).
+- **Price cache** — `fetchCardPrices()` checks `localStorage` before hitting the
+  network. Cache entries expire after 24 hours (configurable via `CACHE_TTL_MS`
+  in `core.js`). The Refresh button always bypasses the cache. A cache status
+  line and "Clear cache" button appear above the table.
+- **Filter bar** — search/filter the visible rows by card name or set without
+  leaving the page.
+- **Improved URL lookup** — two-strategy approach: numeric product ID first,
+  then slug-based name extraction as a fallback.
+- **`fmtAge()`** — human-readable cache age display ("1h 5m ago").
+- **13 new tests** covering `fmtAge`, price cache read/write/clear/TTL, and the
+  updated seed data shape. Total: ~90 tests across 12 groups.
 
 ## Project structure
 
@@ -25,66 +35,67 @@ tcg-tracker/
 ├── tests.html          Test suite page
 ├── css/
 │   ├── style.css       Shared styles (light + dark mode)
-│   └── tests.css       Test suite additional styles
+│   └── tests.css       Test suite styles
 └── js/
-    ├── core.js         Shared logic: card model, calculations, sorting, CSV, API
-    ├── tracker.js      Tracker UI: rendering, search modal, refresh, import/export
-    └── tests.js        Unit test runner & 76 test definitions (11 groups)
+    ├── core.js         All shared logic — exported as ES module
+    ├── tracker.js      Tracker UI — imports from core.js
+    └── tests.js        Test runner — imports from core.js
 ```
 
 ## Running locally
 
-> **A local HTTP server is required.** The Pokémon TCG API uses `fetch()`,
-> which browsers block from `file://` URLs due to CORS restrictions.
-
-### Option 1 — Python (nothing to install)
+> **You must serve via HTTP.** `type="module"` scripts and `fetch()` calls are
+> blocked by browsers from `file://` URLs.
 
 ```bash
+# Python (nothing to install)
 cd tcg-tracker
 python3 -m http.server 8080
 # Open http://localhost:8080
-```
 
-### Option 2 — Node / npx
-
-```bash
+# Node
 cd tcg-tracker
 npx serve .
-# Open the URL shown in the terminal
+
+# VS Code: right-click index.html → Open with Live Server
 ```
-
-### Option 3 — VS Code Live Server
-
-Right-click `index.html` → **Open with Live Server**.
 
 ## Adding cards
 
-The **"+ Add card via search"** button opens a modal with two tabs:
+The **+ Add card via search** button opens a two-tab modal:
 
 | Tab | How it works |
 |-----|-------------|
-| **Search by name** | Type a card name → results from pokemontcg.io with live TCGPlayer prices |
-| **Paste TCGPlayer URL** | Paste a URL like `tcgplayer.com/product/523161/…` → auto-lookup |
+| **Search by name** | Type a card name → live results from pokemontcg.io |
+| **Paste TCGPlayer URL** | Paste a product URL → tries product-ID lookup first, then slug-based name search as a fallback |
 
-After a result appears, select the finish type (Normal / Holofoil / Rev. Holo …),
-then click **Add to list**.
+## Price cache
 
-## Sorting
+Prices are cached in `localStorage` with a 24-hour TTL so that re-opening the
+page or refreshing the list doesn't burn unnecessary API calls.
 
-Click any column header to sort ascending. Click again to reverse. The active
-sort column shows an ↑ or ↓ arrow; inactive columns show a faint ↕.
+- The **Refresh prices** button always bypasses the cache and fetches fresh data.
+- The **Clear cache** button removes all cached entries so the next refresh hits
+  the network for every card.
+- A small **●** dot next to a market price means that price came from the cache.
+- The cache TTL can be changed by editing `CACHE_TTL_MS` in `js/core.js`.
 
-Sortable columns: Name, Finish, Condition, Buy cost, Market (NM), Low, Mid,
-Adj. price, Profit, Profit %, Sold, Date added, Last updated.
+## localStorage keys
 
-## Date tracking
+| Key | Contents |
+|-----|---------|
+| `tcg_tracker_cards` | Full card list (JSON array) |
+| `tcg_price_<tcgplayerId>` | `{ prices, cachedAt }` per card |
 
-| Field | Set when |
-|-------|---------|
-| **Date Added** | Card is first created (search add, URL add, or CSV import) |
-| **Last Updated** | Any field on the card is edited; also updated on price refresh |
+## Condition price multipliers
 
-Both fields survive CSV export/import.
+| Condition | Multiplier |
+|-----------|-----------|
+| NM | 100% |
+| LP | 85% |
+| MP | 70% |
+| HP | 50% |
+| DMG | 30% |
 
 ## CSV format
 
@@ -96,28 +107,12 @@ marketNM, priceLow, priceMid, link, sold, tcgplayerId,
 dateAdded, lastUpdated
 ```
 
-On import you can choose to **add to the existing list** or **replace it**.
-
-## Condition price multipliers
-
-| Condition | Multiplier |
-|-----------|-----------|
-| NM (Near Mint) | 100% |
-| LP (Lightly Played) | 85% |
-| MP (Moderately Played) | 70% |
-| HP (Heavily Played) | 50% |
-| DMG (Damaged) | 30% |
-
-**Adjusted price** = `marketNM × multiplier` (falls back to `priceMid` when `marketNM` is unavailable).
-
 ## API key (optional)
 
-The Pokémon TCG API works without a key at a lower rate limit (~1 000 req/day).
-For heavy use, register free at <https://dev.pokemontcg.io> and add your key
-to the `fetch()` calls in `js/core.js`:
+Register free at <https://dev.pokemontcg.io> and add your key to the `fetch()`
+headers in `js/core.js` (two places: `searchCards` and `fetchCardPrices`):
 
 ```js
-// in searchCards() and fetchCardPrices():
 headers: { 'X-Api-Key': 'YOUR_KEY_HERE' }
 ```
 
@@ -130,12 +125,14 @@ Open `http://localhost:8080/tests.html` and click **Run all tests**.
 | Condition multipliers & adjusted price | 9 |
 | Profit & profit % calculation | 9 |
 | fmt() and fmtPct() display formatting | 11 |
+| fmtAge() | 6 |
 | CSV export & import round-trip | 11 |
-| makeCard defaults & overrides | 9 |
+| makeCard defaults & overrides | 7 |
 | Condition list completeness | 5 |
 | splitCSVLine edge cases | 3 |
 | Date fields — dateAdded & lastUpdated | 10 |
-| Sorting — sortCards() | 8 |
+| Sorting — sortCards() | 7 |
 | generateFilename() | 4 |
 | Seed data — getSeedCards() | 5 |
-| **Total** | **84** |
+| Price cache (localStorage) | 5 |
+| **Total** | **~92** |

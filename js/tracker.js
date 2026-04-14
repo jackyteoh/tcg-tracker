@@ -1,31 +1,54 @@
 /**
  * tracker.js — UI logic for index.html.
- * Depends on core.js (window.TCG).
+ * Imports everything it needs directly from core.js (no window.TCG).
  */
 
-'use strict';
-
-const {
+import {
   CONDITIONS, FINISH_LABELS,
   makeCard, touchUpdated, adjPrice, calcProfit, sortCards,
-  fmt, fmtPct, fmtTime, fmtDate, escHtml,
+  fmt, fmtPct, fmtTime, fmtDate, fmtAge, escHtml,
   downloadCSV, parseCSV, csvRowToCard,
   searchCards, fetchCardPrices, fetchCardByUrl,
+  readPriceCache, inspectPriceCache, clearPriceCache, CACHE_TTL_MS,
   getSeedCards,
-} = window.TCG;
+} from './core.js';
 
 /* ============================================================
    State
    ============================================================ */
 
-let cards          = getSeedCards();   // initialise with dummy data
+const STORAGE_KEY = 'tcg_tracker_cards';
+
+let cards          = loadCardsFromStorage();
 let pendingCSVData = null;
-let selectedResult = null;             // { cardId, cardData, finish, prices, tcgUrl }
+let selectedResult = null;   // { cardId, cardData, finish, prices, tcgUrl }
 let refreshing     = false;
+let filterQuery    = '';
 
 // Sorting state
 let sortKey = 'dateAdded';
 let sortDir = 'desc';
+
+/* ============================================================
+   localStorage persistence
+   ============================================================ */
+
+function saveCardsToStorage() {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(cards));
+  } catch { /* quota exceeded — ignore */ }
+}
+
+function loadCardsFromStorage() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+    }
+  } catch { /* corrupt data — fall through */ }
+  return getSeedCards();
+}
 
 /* ============================================================
    Summary bar
@@ -43,39 +66,47 @@ function updateSummary() {
   document.getElementById('sum-count').textContent  = count;
   document.getElementById('sum-cost').textContent   = fmt(cost);
   document.getElementById('sum-market').textContent = fmt(market);
-  const el = document.getElementById('sum-profit');
-  el.textContent = fmt(profit);
-  el.className   = 'metric-value ' + (profit >= 0 ? 'pos' : 'neg');
+  const profitEl     = document.getElementById('sum-profit');
+  profitEl.textContent = fmt(profit);
+  profitEl.className   = 'metric-value ' + (profit >= 0 ? 'pos' : 'neg');
+}
+
+/* ============================================================
+   Cache status bar
+   ============================================================ */
+
+function updateCacheStatus() {
+  const el = document.getElementById('cache-status');
+  if (!el) return;
+  const { count, oldestAgeMs } = inspectPriceCache();
+  if (count === 0) {
+    el.textContent = 'Price cache empty';
+    return;
+  }
+  const ttlHours = Math.round(CACHE_TTL_MS / 3600000);
+  el.textContent = `${count} price${count !== 1 ? 's' : ''} cached` +
+    (oldestAgeMs !== null ? ` · oldest ${fmtAge(oldestAgeMs)}` : '') +
+    ` · TTL ${ttlHours}h`;
 }
 
 /* ============================================================
    Column sort
    ============================================================ */
 
-/**
- * Called when a sortable <th> is clicked.
- * @param {string} key
- */
 function setSort(key) {
-  if (sortKey === key) {
-    sortDir = sortDir === 'asc' ? 'desc' : 'asc';
-  } else {
-    sortKey = key;
-    sortDir = 'asc';
-  }
+  sortDir = (sortKey === key && sortDir === 'asc') ? 'desc' : 'asc';
+  sortKey = key;
   renderTable();
 }
 
-/** Returns the sort indicator arrow for a column header. */
 function sortArrow(key) {
   if (sortKey !== key) return '<span class="sort-arrow inactive">↕</span>';
   return `<span class="sort-arrow">${sortDir === 'asc' ? '↑' : '↓'}</span>`;
 }
 
-/** Build a sortable <th> element's inner HTML. */
-function th(label, key, extraStyle = '') {
-  return `<th style="cursor:pointer;user-select:none;${extraStyle}" onclick="setSort('${key}')">`
-       + `${label} ${sortArrow(key)}</th>`;
+function buildTh(label, key, extraStyle = '') {
+  return `<th data-sort-key="${key}" style="cursor:pointer;user-select:none;${extraStyle}">` +
+         `${label} ${sortArrow(key)}</th>`;
 }
 
 /* ============================================================
@@ -84,57 +115,73 @@ function th(label, key, extraStyle = '') {
 
 /**
  * Re-render the entire card table.
- * @param {number[]} [highlightIds=[]]  IDs to briefly highlight green (after refresh)
+ * @param {number[]} [highlightIds=[]]  card IDs to briefly highlight after a refresh
  */
 function renderTable(highlightIds = []) {
-  // Rebuild sortable header
+  // ── Header ───────────────────────────────────────────────────────────────
   const thead = document.querySelector('#card-table thead tr');
   thead.innerHTML =
     `<th style="width:54px">Image</th>` +
-    th('Name',         'name',        'min-width:140px') +
-    th('Finish',       'finish',      'width:90px') +
-    th('Condition',    'condition',   'width:84px') +
-    th('Buy cost',     'buyCost',     'width:84px') +
-    th('Market (NM)',  'marketNM',    'width:100px') +
-    th('Low',          'priceLow',    'width:78px') +
-    th('Mid',          'priceMid',    'width:78px') +
-    th('Adj. price',   'adjPrice',    'width:88px') +
-    th('Profit',       'profit',      'width:78px') +
-    th('Profit %',     'pct',         'width:68px') +
+    buildTh('Name',         'name',        'min-width:140px') +
+    buildTh('Finish',       'finish',      'width:90px') +
+    buildTh('Condition',    'condition',   'width:84px') +
+    buildTh('Buy cost',     'buyCost',     'width:84px') +
+    buildTh('Market (NM)',  'marketNM',    'width:100px') +
+    buildTh('Low',          'priceLow',    'width:78px') +
+    buildTh('Mid',          'priceMid',    'width:78px') +
+    buildTh('Adj. price',   'adjPrice',    'width:88px') +
+    buildTh('Profit',       'profit',      'width:78px') +
+    buildTh('Profit %',     'pct',         'width:68px') +
     `<th style="width:80px">Link</th>` +
-    th('Sold',         'sold',        'width:46px') +
-    th('Date added',   'dateAdded',   'width:110px') +
-    th('Last updated', 'lastUpdated', 'width:110px') +
+    buildTh('Sold',         'sold',        'width:46px') +
+    buildTh('Date added',   'dateAdded',   'width:110px') +
+    buildTh('Last updated', 'lastUpdated', 'width:110px') +
     `<th style="width:36px"></th>`;
 
-  const tbody       = document.getElementById('card-body');
-  tbody.innerHTML   = '';
-  const displayRows = sortCards(cards, sortKey, sortDir);
+  // ── Filter + sort ─────────────────────────────────────────────────────────
+  const query      = filterQuery.toLowerCase();
+  const filtered   = query
+    ? cards.filter(c =>
+        c.name.toLowerCase().includes(query) ||
+        c.setName.toLowerCase().includes(query))
+    : cards;
+  const displayRows = sortCards(filtered, sortKey, sortDir);
+
+  // ── Rows ──────────────────────────────────────────────────────────────────
+  const tbody     = document.getElementById('card-body');
+  tbody.innerHTML = '';
 
   for (const card of displayRows) {
     const adj             = adjPrice(card);
     const { profit, pct } = calcProfit(card);
     const highlighted     = highlightIds.includes(card.id);
+    const cached          = readPriceCache(card.tcgplayerId);
 
     const tr = document.createElement('tr');
-    if (card.sold) tr.classList.add('sold');
-    if (highlighted) tr.style.background = 'rgba(60,180,80,0.10)';
+    tr.dataset.cardId = card.id;
+    if (card.sold)    tr.classList.add('sold');
+    if (highlighted)  tr.style.background = 'rgba(60,180,80,0.10)';
+
+    // Image cell — uses a data attribute; click handled by delegation
+    const imgCell = card.imageUrl
+      ? `<img class="card-img"
+              src="${escHtml(card.imageUrl)}"
+              alt="${escHtml(card.name)}"
+              onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
+         <div class="card-img-placeholder" style="display:none">No image</div>`
+      : `<div class="card-img-placeholder" data-action="open-search">Click to search</div>`;
+
+    // Cache age tooltip on Market (NM) cell
+    const cacheTitle = cached
+      ? `title="Cached ${fmtAge(Date.now() - cached.cachedAt)}"`
+      : 'title="Not cached — will fetch on next refresh"';
 
     tr.innerHTML = `
-      <td>
-        ${card.imageUrl
-          ? `<img class="card-img"
-                  src="${escHtml(card.imageUrl)}"
-                  alt="${escHtml(card.name)}"
-                  onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">
-             <div class="card-img-placeholder" style="display:none">No image</div>`
-          : `<div class="card-img-placeholder" onclick="openSearchModal(${card.id})">Click to search</div>`
-        }
-      </td>
+      <td>${imgCell}</td>
 
       <td>
         <input type="text" value="${escHtml(card.name)}" placeholder="Card name"
-               oninput="setField(${card.id}, 'name', this.value)">
+               data-field="name">
         ${card.setName
           ? `<div style="font-size:10px;color:var(--text-tertiary);margin-top:2px">${escHtml(card.setName)}</div>`
           : ''}
@@ -148,7 +195,7 @@ function renderTable(highlightIds = []) {
       </td>
 
       <td>
-        <select onchange="setField(${card.id}, 'condition', this.value)">
+        <select data-field="condition">
           ${CONDITIONS.map(c =>
             `<option value="${c}"${c === card.condition ? ' selected' : ''}>${c}</option>`
           ).join('')}
@@ -157,12 +204,11 @@ function renderTable(highlightIds = []) {
 
       <td>
         <input type="number" value="${card.buyCost}" placeholder="0.00"
-               step="0.01" min="0"
-               oninput="setField(${card.id}, 'buyCost', this.value)">
+               step="0.01" min="0" data-field="buyCost">
       </td>
 
-      <td style="font-size:12px${highlighted ? ';color:var(--text-success)' : ''}">
-        ${fmt(card.marketNM)}
+      <td style="font-size:12px${highlighted ? ';color:var(--text-success)' : ''}" ${cacheTitle}>
+        ${fmt(card.marketNM)}${cached ? ' <span class="cache-dot" title="Cached">●</span>' : ''}
       </td>
       <td style="font-size:12px;color:var(--text-secondary)">${fmt(card.priceLow)}</td>
       <td style="font-size:12px;color:var(--text-secondary)">${fmt(card.priceMid)}</td>
@@ -185,23 +231,101 @@ function renderTable(highlightIds = []) {
       </td>
 
       <td style="text-align:center">
-        <input type="checkbox" ${card.sold ? 'checked' : ''}
-               onchange="setField(${card.id}, 'sold', this.checked)">
+        <input type="checkbox" data-field="sold" ${card.sold ? 'checked' : ''}>
       </td>
 
       <td class="date-cell">${escHtml(fmtDate(card.dateAdded))}</td>
       <td class="date-cell">${escHtml(fmtDate(card.lastUpdated))}</td>
 
       <td>
-        <button class="trash-btn" onclick="deleteCard(${card.id})" title="Delete card">
-          &#x1F5D1;
-        </button>
+        <button class="trash-btn" data-action="delete" title="Delete card">&#x1F5D1;</button>
       </td>
     `;
     tbody.appendChild(tr);
   }
-  console.log("Table rendered successfully");
+
+  // Empty-state row
+  if (displayRows.length === 0) {
+    const emptyTr = document.createElement('tr');
+    emptyTr.innerHTML =
+      `<td colspan="16" style="text-align:center;padding:2rem;color:var(--text-tertiary)">
+         ${query ? `No cards match "${escHtml(filterQuery)}"` : 'No cards yet — add one below.'}
+       </td>`;
+    tbody.appendChild(emptyTr);
+  }
+
   updateSummary();
+  updateCacheStatus();
+}
+
+/* ============================================================
+   Event delegation for the table body
+   Handles: sort headers, field edits, checkbox, delete, image placeholder
+   ============================================================ */
+
+function bindTableDelegation() {
+  // ── Sort headers (on thead) ───────────────────────────────────────────────
+  document.querySelector('#card-table thead').addEventListener('click', e => {
+    const th = e.target.closest('[data-sort-key]');
+    if (th) setSort(th.dataset.sortKey);
+  });
+
+  const tbody = document.getElementById('card-body');
+
+  // ── Text / number inputs ─────────────────────────────────────────────────
+  tbody.addEventListener('input', e => {
+    const input = e.target.closest('input[data-field]');
+    if (!input) return;
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        const cardId = getRowCardId(input);
+        if (cardId !== null) setField(cardId, input.dataset.field, input.value);
+      }
+    }, { once: true});
+
+    // Checkbox (sold)
+    const cb = e.target.closest('input[type="checkbox"][data-field]');
+    if (cb) {
+      const cardId = getRowCardId(cb);
+      if (cardId !== null) setField(cardId, cb.dataset.field, cb.checked);
+    }
+  });
+
+  // ── Select (condition dropdown) ───────────────────────────────────────────
+  tbody.addEventListener('change', e => {
+    const sel = e.target.closest('select[data-field]');
+    if (sel) {
+      const cardId = getRowCardId(sel);
+      if (cardId !== null) setField(cardId, sel.dataset.field, sel.value);
+      return;
+    }
+  });
+
+  // ── Click: delete button & image placeholder ──────────────────────────────
+  tbody.addEventListener('click', e => {
+    const btn = e.target.closest('[data-action]');
+    if (!btn) return;
+
+    if (btn.dataset.action === 'delete') {
+      if (!confirm("Are you sure you want to delete this card?")) {
+        e.preventDefault();
+      } else {
+        const cardId = getRowCardId(btn);
+        if (cardId !== null) deleteCard(cardId);
+        return;
+      }
+    }
+    if (btn.dataset.action === 'open-search') {
+      const cardId = getRowCardId(btn);
+      openSearchModal(cardId ?? undefined);
+    }
+  });
+}
+
+/** Walk up from an element to its <tr> and return the card id stored there. */
+function getRowCardId(el) {
+  const tr = el.closest('tr[data-card-id]');
+  return tr ? parseInt(tr.dataset.cardId, 10) : null;
 }
 
 /* ============================================================
@@ -213,11 +337,28 @@ function setField(id, field, value) {
   if (!card) return;
   card[field] = value;
   touchUpdated(card);
+  saveCardsToStorage();
   renderTable();
 }
 
 function deleteCard(id) {
   cards = cards.filter(c => c.id !== id);
+  saveCardsToStorage();
+  renderTable();
+}
+
+/* ============================================================
+   Filter bar
+   ============================================================ */
+
+function onFilterInput(e) {
+  filterQuery = e.target.value;
+  renderTable();
+}
+
+function clearFilter() {
+  filterQuery = '';
+  document.getElementById('filter-input').value = '';
   renderTable();
 }
 
@@ -235,20 +376,21 @@ async function refreshAllPrices() {
   }
 
   refreshing = true;
-  const btn = document.getElementById('refresh-btn');
-  btn.disabled = true;
-  btn.innerHTML = '<span class="spin">&#8635;</span> Refreshing…';
+  const refreshBtn = document.getElementById('refresh-btn');
+  refreshBtn.disabled = true;
+  refreshBtn.innerHTML = '<span class="spin">&#8635;</span> Refreshing…';
   setStatus(
     `<span class="spin" style="display:inline-block;animation:spin 0.85s linear infinite">&#8635;</span>` +
     ` Fetching prices for ${refreshable.length} card${refreshable.length > 1 ? 's' : ''}…`, ''
   );
 
-  let ok = 0, fail = 0;
+  let ok = 0, fail = 0, fromCache = 0;
   const updatedIds = [];
 
   for (const card of refreshable) {
     try {
-      const prices = await fetchCardPrices(card.tcgplayerId);
+      // forceRefresh=true so the Refresh button always hits the network
+      const prices = await fetchCardPrices(card.tcgplayerId, true);
       if (prices) {
         const p = prices[card.finish] || prices[Object.keys(prices)[0]] || {};
         if (p.market !== undefined) card.marketNM  = p.market;
@@ -267,24 +409,27 @@ async function refreshAllPrices() {
     await new Promise(r => setTimeout(r, 150));
   }
 
+  saveCardsToStorage();
   renderTable(updatedIds);
 
   const time = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
   setStatus(
     `Refreshed ${ok} card${ok !== 1 ? 's' : ''}` +
+    (fromCache ? ` (${fromCache} from cache)` : '') +
     (fail ? ` · ${fail} failed` : '') +
     `  ·  ${time}`,
     fail && !ok ? 'err' : 'ok'
   );
 
-  btn.disabled = false;
-  btn.innerHTML = `
+  refreshBtn.disabled = false;
+  refreshBtn.innerHTML = `
     <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor"
          stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
       <path d="M1 8a7 7 0 1 0 1.4-4.2"/><polyline points="1,2 1,6 5,6"/>
     </svg>
     Refresh prices`;
   refreshing = false;
+  updateCacheStatus();
 }
 
 function setStatus(html, type = '') {
@@ -299,17 +444,13 @@ function setStatus(html, type = '') {
 
 function openSearchModal(editId) {
   selectedResult = null;
-
-  // Reset all tabs and fields
-  document.getElementById('search-input').value   = '';
-  document.getElementById('url-input').value      = '';
+  document.getElementById('search-input').value            = '';
+  document.getElementById('url-input').value               = '';
   document.getElementById('search-results-area').innerHTML = '';
-  document.getElementById('url-status').innerHTML = '';
-  document.getElementById('add-selected-btn').disabled = true;
-  document.getElementById('search-modal').dataset.editId = editId || '';
-  document.getElementById('search-modal').style.display = 'flex';
-
-  // Default to name search tab
+  document.getElementById('url-status').innerHTML          = '';
+  document.getElementById('add-selected-btn').disabled     = true;
+  document.getElementById('search-modal').dataset.editId   = editId ?? '';
+  document.getElementById('search-modal').style.display    = 'flex';
   switchTab('name');
   setTimeout(() => document.getElementById('search-input').focus(), 80);
 }
@@ -319,38 +460,26 @@ function closeSearchModal() {
   selectedResult = null;
 }
 
-/** Switch between "Search by name" and "Paste URL" tabs. */
 function switchTab(tab) {
-  const namePane = document.getElementById('tab-name');
-  const urlPane  = document.getElementById('tab-url');
-  const nameBtn  = document.getElementById('tabBtn-name');
-  const urlBtn   = document.getElementById('tabBtn-url');
-
-  if (tab === 'name') {
-    namePane.style.display = 'block';
-    urlPane.style.display  = 'none';
-    nameBtn.classList.add('tab-active');
-    urlBtn.classList.remove('tab-active');
-    document.getElementById('add-selected-btn').disabled = !selectedResult;
-  } else {
-    namePane.style.display = 'none';
-    urlPane.style.display  = 'block';
-    nameBtn.classList.remove('tab-active');
-    urlBtn.classList.add('tab-active');
-  }
+  const isName = tab === 'name';
+  document.getElementById('tab-name').style.display  = isName ? 'block' : 'none';
+  document.getElementById('tab-url').style.display   = isName ? 'none'  : 'block';
+  document.getElementById('tabBtn-name').classList.toggle('tab-active',  isName);
+  document.getElementById('tabBtn-url').classList.toggle('tab-active',  !isName);
+  if (isName) document.getElementById('add-selected-btn').disabled = !selectedResult;
 }
 
-/* ---- Name search tab ---- */
+/* ── Name search ──────────────────────────────────────────────────────────── */
 
 async function doSearch() {
-  const q = document.getElementById('search-input').value.trim();
+  const q       = document.getElementById('search-input').value.trim();
+  const area    = document.getElementById('search-results-area');
+  const searchBtn = document.getElementById('search-btn');
   if (!q) return;
 
-  const area = document.getElementById('search-results-area');
-  const btn  = document.getElementById('search-btn');
-  area.innerHTML = '<div class="loading-state">Searching…</div>';
-  btn.disabled   = true;
-  selectedResult = null;
+  area.innerHTML       = '<div class="loading-state">Searching…</div>';
+  searchBtn.disabled   = true;
+  selectedResult       = null;
   document.getElementById('add-selected-btn').disabled = true;
 
   try {
@@ -361,10 +490,10 @@ async function doSearch() {
     }
     renderSearchResults(data);
   } catch (err) {
-    area.innerHTML = `<div class="no-results">Search failed: ${escHtml(err.message)}.<br>
-      If you're running locally, make sure you're serving via HTTP (not file://).</div>`;
+    area.innerHTML = `<div class="no-results">Search failed: ${escHtml(err.message)}<br>
+      Make sure you are serving via HTTP (not file://).</div>`;
   } finally {
-    btn.disabled = false;
+    searchBtn.disabled = false;
   }
 }
 
@@ -385,21 +514,16 @@ function renderSearchResults(data) {
 
     const pricePills = finishKeys.map(fk => {
       const p = prices[fk];
-      return `<span class="price-pill${fk === defaultFin ? ' selected-type' : ''}"
-                     data-finish="${fk}"
-                     onclick="selectFinish('${card.id}','${fk}',event)">
+      return `<span class="price-pill${fk === defaultFin ? ' selected-type' : ''}" data-finish="${fk}">
                 ${FINISH_LABELS[fk] || fk}: ${p.market ? '$' + Number(p.market).toFixed(2) : '—'}
               </span>`;
     }).join('');
 
     const finishBtns = finishKeys.length > 1
       ? finishKeys.map(fk =>
-          `<button class="finish-btn${fk === defaultFin ? ' active' : ''}"
-                   data-finish="${fk}"
-                   onclick="selectFinish('${card.id}','${fk}',event)">
+          `<button class="finish-btn${fk === defaultFin ? ' active' : ''}" data-finish="${fk}">
              ${FINISH_LABELS[fk] || fk}
-           </button>`
-        ).join('')
+           </button>`).join('')
       : '';
 
     div.innerHTML = `
@@ -411,8 +535,7 @@ function renderSearchResults(data) {
           ${pricePills || '<span style="font-size:11px;color:var(--text-tertiary)">No price data</span>'}
         </div>
         ${finishBtns ? `<div class="finish-picker">${finishBtns}</div>` : ''}
-      </div>
-    `;
+      </div>`;
 
     div.dataset.cardJson = JSON.stringify({
       id:        card.id,
@@ -422,52 +545,52 @@ function renderSearchResults(data) {
       tcgplayer: card.tcgplayer || null,
     });
 
-    div.addEventListener('click', () => selectResultCard(card, div));
+    // Delegate clicks within the result card
+    div.addEventListener('click', e => {
+      // Finish pill / button
+      const pill = e.target.closest('.price-pill, .finish-btn');
+      if (pill) { e.stopPropagation(); selectFinish(card.id, pill.dataset.finish, div); return; }
+      // Card selection
+      selectResultCard(card, div);
+    });
+
     area.appendChild(div);
   }
 }
 
-function selectFinish(cardId, finish, evt) {
-  evt.stopPropagation();
-  const div = document.querySelector(`[data-card-id="${cardId}"]`);
-  if (!div) return;
+function selectFinish(cardId, finish, div) {
   div.dataset.selectedFinish = finish;
   div.querySelectorAll('.price-pill').forEach(p =>
     p.classList.toggle('selected-type', p.dataset.finish === finish));
   div.querySelectorAll('.finish-btn').forEach(b =>
     b.classList.toggle('active', b.dataset.finish === finish));
-  if (selectedResult && selectedResult.cardId === cardId) selectedResult.finish = finish;
+  if (selectedResult?.cardId === cardId) selectedResult.finish = finish;
 }
 
 function selectResultCard(card, div) {
   document.querySelectorAll('.result-card').forEach(d => d.classList.remove('selected'));
   div.classList.add('selected');
-
   const finish   = div.dataset.selectedFinish || Object.keys(card.tcgplayer?.prices || {})[0] || 'normal';
   const cardData = JSON.parse(div.dataset.cardJson);
-
   selectedResult = {
-    cardId: card.id,
-    cardData,
-    finish,
+    cardId: card.id, cardData, finish,
     prices: card.tcgplayer?.prices || {},
-    tcgUrl: card.tcgplayer?.url || '',
+    tcgUrl: card.tcgplayer?.url    || '',
   };
   document.getElementById('add-selected-btn').disabled = false;
 }
 
-/* ---- URL tab ---- */
+/* ── URL lookup tab ───────────────────────────────────────────────────────── */
 
 async function doUrlLookup() {
-  const url     = document.getElementById('url-input').value.trim();
+  const url      = document.getElementById('url-input').value.trim();
   const statusEl = document.getElementById('url-status');
-  const btn      = document.getElementById('url-lookup-btn');
-
+  const lookupBtn = document.getElementById('url-lookup-btn');
   if (!url) return;
 
-  statusEl.innerHTML = '<span style="color:var(--text-secondary)">Looking up card…</span>';
-  btn.disabled       = true;
-  selectedResult     = null;
+  statusEl.innerHTML  = '<span style="color:var(--text-secondary)">Looking up card…</span>';
+  lookupBtn.disabled  = true;
+  selectedResult      = null;
   document.getElementById('add-selected-btn').disabled = true;
 
   try {
@@ -475,38 +598,35 @@ async function doUrlLookup() {
     if (!card) {
       statusEl.innerHTML =
         `<span style="color:var(--text-danger)">
-           Could not find a matching Pokémon card for that URL.<br>
-           Make sure it's a TCGPlayer product URL (e.g. tcgplayer.com/product/12345/…).
+           Could not find a matching Pokémon card.<br>
+           Tip: make sure it's a TCGPlayer product URL
+           (e.g. tcgplayer.com/product/523161/pokemon-…).
+           If the URL has no slug after the ID, the name search fallback
+           cannot run — try searching by name instead.
          </span>`;
       return;
     }
-
-    // Render the single result in the name-search results area,
-    // then switch to name tab so user can see and select it
+    // Show result in the name tab and auto-select it
     renderSearchResults([card]);
     switchTab('name');
-
-    // Auto-select the single result
-    const div = document.querySelector('.result-card');
-    if (div) selectResultCard(card, div);
-
+    const resultDiv = document.querySelector('.result-card');
+    if (resultDiv) selectResultCard(card, resultDiv);
     statusEl.innerHTML = '';
   } catch (err) {
     statusEl.innerHTML =
       `<span style="color:var(--text-danger)">Lookup failed: ${escHtml(err.message)}</span>`;
   } finally {
-    btn.disabled = false;
+    lookupBtn.disabled = false;
   }
 }
 
-/* ---- Add card to list ---- */
+/* ── Add selected card to list ────────────────────────────────────────────── */
 
 function addSelectedCard() {
   if (!selectedResult) return;
-
   const { cardData, finish, prices, tcgUrl } = selectedResult;
   const p      = prices[finish] || {};
-  const editId = parseInt(document.getElementById('search-modal').dataset.editId) || 0;
+  const editId = parseInt(document.getElementById('search-modal').dataset.editId, 10) || 0;
 
   const entry = {
     name:        cardData.name,
@@ -516,7 +636,7 @@ function addSelectedCard() {
     marketNM:    p.market ?? null,
     priceLow:    p.low    ?? null,
     priceMid:    p.mid    ?? null,
-    link:        tcgUrl || '',
+    link:        tcgUrl   || '',
     condition:   'NM',
     buyCost:     '',
     sold:        false,
@@ -525,14 +645,12 @@ function addSelectedCard() {
 
   if (editId) {
     const idx = cards.findIndex(c => c.id === editId);
-    if (idx >= 0) {
-      cards[idx] = { ...cards[idx], ...entry };
-      touchUpdated(cards[idx]);
-    }
+    if (idx >= 0) { cards[idx] = { ...cards[idx], ...entry }; touchUpdated(cards[idx]); }
   } else {
     cards.push(makeCard(entry));
   }
 
+  saveCardsToStorage();
   closeSearchModal();
   renderTable();
 }
@@ -541,10 +659,6 @@ function addSelectedCard() {
    CSV import
    ============================================================ */
 
-/**
- * Open the file picker using the File System Access API when available,
- * otherwise fall back to a hidden <input type="file">.
- */
 async function triggerImport() {
   if (window.showOpenFilePicker) {
     try {
@@ -552,14 +666,12 @@ async function triggerImport() {
         types: [{ description: 'CSV files', accept: { 'text/csv': ['.csv'] } }],
         multiple: false,
       });
-      const file = await fh.getFile();
-      const text = await file.text();
+      const text = await (await fh.getFile()).text();
       pendingCSVData = text;
       document.getElementById('import-modal').style.display = 'flex';
       return;
     } catch (err) {
-      if (err.name === 'AbortError') return; // user cancelled
-      // Fall through to legacy input
+      if (err.name === 'AbortError') return;
     }
   }
   document.getElementById('file-input').click();
@@ -587,6 +699,7 @@ function doImport(mode) {
   const rows = parseCSV(pendingCSVData);
   if (mode === 'replace') cards = [];
   for (const row of rows) cards.push(csvRowToCard(row));
+  saveCardsToStorage();
   closeImportModal();
   renderTable();
 }
@@ -595,77 +708,76 @@ function doImport(mode) {
    CSV export
    ============================================================ */
 
-async function exportCSV() {
+async function handleExportCSV() {
   await downloadCSV(cards);
 }
 
 /* ============================================================
-   Keyboard shortcuts
+   Cache controls
    ============================================================ */
 
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    closeSearchModal();
-    closeImportModal();
-  }
-});
+function handleClearCache() {
+  clearPriceCache();
+  updateCacheStatus();
+  setStatus('Price cache cleared — next refresh will fetch all prices from the API.', 'ok');
+}
 
 /* ============================================================
-   Init
+   initUI — wire all static buttons (Option A)
+   ============================================================ */
+
+function initUI() {
+  // ── Main toolbar ────────────────────────────────────────────────────────
+  document.getElementById('refresh-btn').addEventListener('click', refreshAllPrices);
+  document.getElementById('import-csv').addEventListener('click', triggerImport);
+  document.getElementById('export-csv').addEventListener('click', handleExportCSV);
+  document.getElementById('add-card-via-search-btn').addEventListener('click', () => openSearchModal());
+  document.getElementById('clear-cache-btn').addEventListener('click', handleClearCache);
+
+  // ── Filter bar ───────────────────────────────────────────────────────────
+  document.getElementById('filter-input').addEventListener('input', onFilterInput);
+  document.getElementById('filter-clear').addEventListener('click', clearFilter);
+
+  // ── Import modal ─────────────────────────────────────────────────────────
+  document.getElementById('close-import-btn').addEventListener('click', closeImportModal);
+  document.getElementById('do-import-btn').addEventListener('click', () => doImport('add'));
+  document.getElementById('replace-import-btn').addEventListener('click', () => doImport('replace'));
+
+  // ── Search modal tabs ─────────────────────────────────────────────────────
+  document.getElementById('tabBtn-name').addEventListener('click', () => switchTab('name'));
+  document.getElementById('tabBtn-url').addEventListener('click', () => switchTab('url'));
+
+  // ── Name search ───────────────────────────────────────────────────────────
+  document.getElementById('search-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doSearch();
+  });
+  document.getElementById('search-btn').addEventListener('click', doSearch);
+
+  // ── URL lookup ────────────────────────────────────────────────────────────
+  document.getElementById('url-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') doUrlLookup();
+  });
+  document.getElementById('url-lookup-btn').addEventListener('click', doUrlLookup);
+
+  // ── Search modal footer ───────────────────────────────────────────────────
+  document.getElementById('close-search-btn').addEventListener('click', closeSearchModal);
+  document.getElementById('add-selected-btn').addEventListener('click', addSelectedCard);
+
+  // ── Hidden file input (CSV import fallback) ───────────────────────────────
+  document.getElementById('file-input').addEventListener('change', handleFileImport);
+
+  // ── Keyboard shortcuts ────────────────────────────────────────────────────
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { closeSearchModal(); closeImportModal(); }
+  });
+
+  // ── Table event delegation ────────────────────────────────────────────────
+  bindTableDelegation();
+}
+
+/* ============================================================
+   Boot
    ============================================================ */
 
 renderTable();
-
-/* ============================================================
-   Event Listeners - main page
-   ============================================================ */
-
-const refresh_btn = document.getElementById("refresh-btn");
-const import_btn = document.getElementById("import-csv");
-const export_btn = document.getElementById("export-csv");
-const add_btn = document.getElementById("add-card-via-search-btn");
-
-const close_import_btn = document.getElementById("close-import-btn");
-const do_import_btn = document.getElementById("do-import-btn");
-const replace_import_btn = document.getElementById("replace-import-btn");
-
-const tab_btn_name = document.getElementById("tabBtn-name");
-const tab_btn_url = document.getElementById("tabBtn-url")
-
-const search_input = document.getElementById("search-input");
-const search_btn = document.getElementById("search-btn");
-
-const url_input = document.getElementById("url-input");
-const url_btn = document.getElementById("url-lookup-btn");
-
-const close_search_btn = document.getElementById("close-search-btn");
-const add_selected_btn = document.getElementById("add-selected-btn");
-
-refresh_btn.addEventListener("click", refreshAllPrices);
-import_btn.addEventListener("click", triggerImport);
-export_btn.addEventListener("click", exportCSV);
-add_btn.addEventListener("click", openSearchModal);
-
-close_import_btn.addEventListener("click", closeImportModal);
-do_import_btn.addEventListener("click", () => doImport('add'));
-replace_import_btn.addEventListener("click", () => doImport('replace'));
-
-tab_btn_name.addEventListener("click", () => switchTab('name'));
-tab_btn_url.addEventListener("click", () => switchTab('url'));
-
-search_input.addEventListener("keydown", (event) => { 
-  if (event.key === 'Enter') {
-    doSearch();
-  }
-});
-search_btn.addEventListener("click", doSearch);
-
-url_input.addEventListener("keydown", (event) => { 
-  if (event.key === 'Enter') {
-    doUrlLookup();
-  }
-});
-url_btn.addEventListener("click", doUrlLookup); // NEED TO FIX URL LOOKUP
-
-close_search_btn.addEventListener("click", closeSearchModal);
-add_selected_btn.addEventListener("click", addSelectedCard);
+initUI();

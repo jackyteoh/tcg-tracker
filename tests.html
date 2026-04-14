@@ -20,7 +20,9 @@
         <a class="btn btn-sm" href="index.html">← Back to tracker</a>
         <button class="btn btn-sm" id="test-toggle-log-btn">Toggle log</button>
         <button class="btn btn-sm btn-primary" id="run-btn">
-          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor"><polygon points="3,2 13,8 3,14"/></svg>
+          <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor">
+            <polygon points="3,2 13,8 3,14"/>
+          </svg>
           Run all tests
         </button>
       </div>
@@ -42,7 +44,7 @@
 
   </div>
 
-  <script type="module" src="js/core.js"></script>
+  <!-- Only tests.js needs to be listed — it imports core.js itself -->
   <script type="module" src="js/tests.js"></script>
 </body>
 </html>

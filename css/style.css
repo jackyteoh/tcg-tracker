@@ -413,3 +413,57 @@ code {
 @media (max-width: 640px) {
   .summary-bar { grid-template-columns: 1fr 1fr; }
 }
+
+/* ── Status row (refresh status + cache controls) ────────────── */
+.status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 24px;
+  margin-bottom: 0.6rem;
+}
+.cache-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.cache-status-text {
+  font-size: 11px;
+  color: var(--text-tertiary);
+}
+
+/* ── Cache dot indicator on market price cell ────────────────── */
+.cache-dot {
+  font-size: 8px;
+  color: var(--text-success);
+  vertical-align: super;
+  margin-left: 2px;
+  cursor: default;
+}
+
+/* ── Filter bar ──────────────────────────────────────────────── */
+.filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 0.75rem;
+}
+.filter-input-wrap {
+  position: relative;
+  flex: 1;
+  max-width: 360px;
+}
+.filter-icon {
+  position: absolute;
+  left: 9px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--text-tertiary);
+}
+.filter-input-wrap input {
+  padding-left: 30px;
+  width: 100%;
+}
