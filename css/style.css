@@ -145,6 +145,8 @@ body {
 /* ── Table wrapper ───────────────────────────────────────── */
 .table-wrap {
   overflow-x: auto;
+  overflow-y: auto; 
+  max-height: calc(100vh - 280px);
   border: 0.5px solid var(--border-subtle);
   border-radius: var(--radius-lg);
   background: var(--bg-primary);
@@ -166,6 +168,9 @@ thead th {
   color: var(--text-secondary);
   border-bottom: 0.5px solid var(--border-subtle);
   white-space: nowrap;
+  position: sticky; 
+  top: 0; 
+  z-index: 10;
   /* cursor and user-select are set inline for sortable columns */
 }
 thead th:hover { color: var(--text-primary); }
@@ -466,4 +471,12 @@ code {
 .filter-input-wrap input {
   padding-left: 30px;
   width: 100%;
+}
+
+/* ── Add card via search button, locking it in place for better UX practices ──────────────────────────────────────────────── */
+#add-card-via-search-btn {
+  position: sticky; 
+  bottom: 0; 
+  z-index: 10;
+  background: var(--bg-secondary);
 }
